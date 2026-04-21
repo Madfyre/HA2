@@ -1,5 +1,5 @@
 """
-    CUDA_VISIBLE_DEVICES=0,4,5 torchrun --nproc_per_node=3 train_task2.py \\
+    CUDA_VISIBLE_DEVICES=0,4,5 torchrun --nproc_per_node=3 train_task2_2.py \\
         --data-root ~/NES_HA\\!/HA2 --epochs 50 --batch-size 32 --lr 8e-4
 """
 
@@ -17,6 +17,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
 from torchvision.datasets import ImageFolder
+
 
 def seed_everything(seed: int) -> None:
     random.seed(seed)
@@ -93,9 +94,9 @@ class LitConvNeXt(pl.LightningModule):
         bb_lr = lr * self.hparams.backbone_lr_mult
         opt = torch.optim.AdamW(
             [
-                {"params": backbone_decay,   "lr": bb_lr, "weight_decay": self.hparams.weight_decay},
+                {"params": backbone_decay, "lr": bb_lr, "weight_decay": self.hparams.weight_decay},
                 {"params": backbone_nodecay, "lr": bb_lr, "weight_decay": 0.0},
-                {"params": head,             "lr": lr,    "weight_decay": self.hparams.weight_decay},
+                {"params": head, "lr": lr, "weight_decay": self.hparams.weight_decay},
             ],
         )
         warmup = LinearLR(
@@ -211,6 +212,7 @@ def main():
         monitor="val_acc", mode="max", save_top_k=1,
         filename="best-{epoch}-{val_acc:.3f}",
     )
+
     lr_cb = pl.callbacks.LearningRateMonitor(logging_interval="epoch")
     early = pl.callbacks.EarlyStopping(
         monitor="val_acc", mode="max", patience=args.patience
@@ -238,7 +240,7 @@ def main():
             torch.save(best.net.state_dict(), args.out)
             print(f"\n[rank 0] Saved BEST weights to {args.out}")
             print(f"[rank 0] Best val_acc = {ckpt_cb.best_model_score:.4f}")
-            print(f"[rank 0] Best ckpt    = {best_path}")
+            print(f"[rank 0] Best ckpt = {best_path}")
         else:
             torch.save(model.net.state_dict(), args.out)
             print(f"\n[rank 0] Saved final (last-epoch) weights to {args.out}")
