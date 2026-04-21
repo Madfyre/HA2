@@ -1,19 +1,6 @@
 """
-train_task2.py — fine-tune ConvNeXt-Base for val_acc >= 0.8 on a 100-class
-ImageFolder dataset, using real DDP via torchrun.
-
-Usage (on Imladris, inside tmux):
-
     CUDA_VISIBLE_DEVICES=0,4,5 torchrun --nproc_per_node=3 train_task2.py \\
         --data-root ~/NES_HA\\!/HA2 --epochs 50 --batch-size 32 --lr 8e-4
-
-Expected wall-clock: ~2.5-3 hours on 3x A4000 at 232x232.
-Target: val_acc ~0.75-0.85 (with TTA at eval time, +0.5-1.5% on top).
-
-The output `net_task2.pt` is the state_dict of YourNet, for notebook eval:
-
-    net = YourNet(ncl=100)
-    net.load_state_dict(torch.load('net_task2.pt', map_location='cuda'))
 """
 
 import argparse
@@ -31,10 +18,6 @@ from torch.utils.data import DataLoader
 from torchvision import models, transforms
 from torchvision.datasets import ImageFolder
 
-
-# -----------------------------------------------------------------------------
-# Seeds
-# -----------------------------------------------------------------------------
 def seed_everything(seed: int) -> None:
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -43,20 +26,6 @@ def seed_everything(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-# -----------------------------------------------------------------------------
-# Model: ConvNeXt-Base + custom classifier head for 100 classes.
-#
-# ConvNeXt-Base classifier is:
-#   Sequential(
-#     (0): LayerNorm2d
-#     (1): Flatten
-#     (2): Linear(in_features=1024, out_features=1000)
-#   )
-#
-# stochastic_depth_prob=0.1 — mild per-block dropout for regularization during
-# fine-tuning. The ConvNeXt paper uses 0.5 for Base when training from scratch;
-# for fine-tuning much smaller values (0.1-0.2) are standard.
-# -----------------------------------------------------------------------------
 class YourNet(nn.Module):
     def __init__(self, ncl: int = 100, stochastic_depth_prob: float = 0.1):
         super().__init__()
@@ -64,7 +33,7 @@ class YourNet(nn.Module):
             weights=models.ConvNeXt_Base_Weights.IMAGENET1K_V1,
             stochastic_depth_prob=stochastic_depth_prob,
         )
-        in_features = self.net.classifier[2].in_features  # 1024
+        in_features = self.net.classifier[2].in_features
         self.net.classifier[2] = nn.Linear(in_features, ncl)
         self.hit = 0
         self.tot = 0
@@ -89,9 +58,6 @@ class YourNet(nn.Module):
         return acc
 
 
-# -----------------------------------------------------------------------------
-# LightningModule
-# -----------------------------------------------------------------------------
 class LitConvNeXt(pl.LightningModule):
     def __init__(
         self,
@@ -99,7 +65,7 @@ class LitConvNeXt(pl.LightningModule):
         lr: float = 8e-4,
         max_epochs: int = 50,
         warmup_epochs: int = 3,
-        weight_decay: float = 5e-2,       # higher WD works better for ConvNeXt
+        weight_decay: float = 5e-2,
         label_smoothing: float = 0.1,
         backbone_lr_mult: float = 0.1,
         stochastic_depth_prob: float = 0.1,
@@ -112,18 +78,13 @@ class LitConvNeXt(pl.LightningModule):
         return self.net._forward(x)
 
     def configure_optimizers(self):
-        # Two param groups:
-        #   - fresh classifier head  -> full LR
-        #   - pretrained backbone    -> lr * backbone_lr_mult (0.1)
-        # No weight decay on norm layers and biases (standard practice for
-        # transformers/ConvNeXt — improves fine-tuning stability).
         head, backbone_decay, backbone_nodecay = [], [], []
         for name, p in self.net.named_parameters():
             if not p.requires_grad:
                 continue
             if name.startswith("net.classifier"):
                 head.append(p)
-            elif p.ndim <= 1 or name.endswith(".bias"):   # norms, biases
+            elif p.ndim <= 1 or name.endswith(".bias"):
                 backbone_nodecay.append(p)
             else:
                 backbone_decay.append(p)
@@ -137,8 +98,6 @@ class LitConvNeXt(pl.LightningModule):
                 {"params": head,             "lr": lr,    "weight_decay": self.hparams.weight_decay},
             ],
         )
-
-        # Linear warmup (warmup_epochs) -> cosine decay to 0 over the rest.
         warmup = LinearLR(
             opt, start_factor=1e-3, end_factor=1.0,
             total_iters=self.hparams.warmup_epochs,
@@ -153,6 +112,7 @@ class LitConvNeXt(pl.LightningModule):
         )
         return {"optimizer": opt, "lr_scheduler": sched}
 
+
     def _shared_step(self, batch, stage: str):
         img, lbl = batch
         logits = self.net._forward(img)
@@ -164,24 +124,19 @@ class LitConvNeXt(pl.LightningModule):
         self.log(f"{stage}_acc",  acc,  prog_bar=True, sync_dist=True)
         return loss
 
+
     def training_step(self, batch, _):
         return self._shared_step(batch, "train")
+
 
     def validation_step(self, batch, _):
         self._shared_step(batch, "val")
 
 
-# -----------------------------------------------------------------------------
-# Data
-# -----------------------------------------------------------------------------
 def build_dataloaders(data_root: str, batch_size: int, num_workers: int, img_size: int):
     mn = [0.485, 0.456, 0.406]
     sd = [0.229, 0.224, 0.225]
 
-    # Training augmentations: AutoAugment(ImageNet) — strongest principled aug
-    # covered in Seminar 4 (there they used AutoAugmentPolicy.CIFAR10).
-    # Plus RandomResizedCrop for scale invariance, and RandomErasing for
-    # extra occlusion-style regularization.
     tf_t = transforms.Compose([
         transforms.Resize(int(img_size * 1.15)),
         transforms.RandomResizedCrop(img_size, scale=(0.7, 1.0), ratio=(0.85, 1.15)),
@@ -191,8 +146,7 @@ def build_dataloaders(data_root: str, batch_size: int, num_workers: int, img_siz
         transforms.Normalize(mn, sd),
         transforms.RandomErasing(p=0.25),
     ])
-    # Eval: center crop at the same size. Slightly larger resize (1.14x) before
-    # center crop is a standard trick that adds ~0.3% val_acc.
+
     tf_v = transforms.Compose([
         transforms.Resize(int(img_size * 1.14)),
         transforms.CenterCrop(img_size),
@@ -205,28 +159,25 @@ def build_dataloaders(data_root: str, batch_size: int, num_workers: int, img_siz
 
     dl_t = DataLoader(
         ds_t, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True, persistent_workers=True,
+        num_workers=num_workers, pin_memory=True, persistent_workers=False,
     )
     dl_v = DataLoader(
         ds_v, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True, persistent_workers=True,
+        num_workers=num_workers, pin_memory=True, persistent_workers=False,
     )
     return dl_t, dl_v
 
 
-# -----------------------------------------------------------------------------
-# Entrypoint
-# -----------------------------------------------------------------------------
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data-root", default=os.path.expanduser("~/NES_HA!/HA2"))
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--warmup-epochs", type=int, default=3)
-    p.add_argument("--batch-size", type=int, default=32,
+    p.add_argument("--batch-size", type=int, default=16,
                    help="PER-GPU batch size. Effective = N_GPU * batch_size.")
-    p.add_argument("--lr", type=float, default=8e-4,
+    p.add_argument("--lr", type=float, default=2e-4,
                    help="Peak head LR. Backbone uses lr * 0.1.")
-    p.add_argument("--num-workers", type=int, default=6)
+    p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=123456)
     p.add_argument("--img-size", type=int, default=232)
     p.add_argument("--stochastic-depth-prob", type=float, default=0.1)
@@ -235,8 +186,9 @@ def main():
     p.add_argument("--out", default="net_task2.pt")
     p.add_argument("--log-dir", default="logs")
     p.add_argument("--patience", type=int, default=15)
-    p.add_argument("--accumulate-grad-batches", type=int, default=1,
+    p.add_argument("--accumulate-grad-batches", type=int, default=2,
                    help="Bump if you can't fit the batch size you want.")
+
     args = p.parse_args()
 
     seed_everything(args.seed)
